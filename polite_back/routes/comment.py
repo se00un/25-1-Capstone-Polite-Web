@@ -1,5 +1,5 @@
 # polite_back/routes/comment.py
-# 수정 확인용 주석
+# 수정 확인!! 
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,9 +7,9 @@ from sqlalchemy import select
 from polite_back import model
 from polite_back.database import get_db
 from polite_back.schemas.schemas import CommentCreate, CommentOut
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 
-KST = timezone(timedelta(hours=9))
+KST = timedelta(hours=9)
 
 router = APIRouter()
 
@@ -25,7 +25,7 @@ async def add_comment(comment: CommentCreate, db: AsyncSession = Depends(get_db)
         selected_version=comment.selected_version,
         reply_to=comment.reply_to,
         is_modified=comment.is_modified,
-        created_at=datetime.now(KST),
+        created_at = (datetime.utcnow() + KST).replace(tzinfo=None),
     )
 
     db.add(new_comment)
