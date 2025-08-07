@@ -12,11 +12,13 @@ import asyncio
 
 app = FastAPI()
 
+'''
 # startup 시 비동기 테이블 생성
 @app.on_event("startup")
 async def startup_event():
     async with engine.begin() as conn:
         await conn.run_sync(model.Base.metadata.create_all)
+'''
 
 # CORS 허용 (프론트 주소로 수정 가능)
 app.add_middleware(
