@@ -18,4 +18,3 @@ def refine_text(text: str) -> str:
 async def generate_polite_text(input: InputText):
     polite_text = refine_text(input.text)
     return {"polite_text": polite_text}
-

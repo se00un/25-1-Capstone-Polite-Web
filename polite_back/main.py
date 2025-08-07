@@ -7,10 +7,12 @@ from polite_back.routes.users import router as user_router
 from polite_back.routes.post import router as post_router  
 from polite_back import model
 from polite_back.database import engine
+
 import asyncio
 
 app = FastAPI()
 
+# startup 시 비동기 테이블 생성
 @app.on_event("startup")
 async def startup_event():
     async with engine.begin() as conn:
@@ -35,5 +37,6 @@ app.include_router(post_router)
 @app.get("/")
 def read_root():
     return {"message": "Polite_Web 서버 실행 중"}
+
 
 

@@ -1,4 +1,6 @@
 # polite_back/routes/bert.py
+# 수정 확인용 주석
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from polite_back.models.bert_model import predict

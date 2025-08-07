@@ -1,4 +1,5 @@
 # polite_back/routes/comment.py
+# 수정 확인용 주석
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
