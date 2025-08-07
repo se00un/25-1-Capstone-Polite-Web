@@ -9,7 +9,7 @@ router = APIRouter(prefix="/kobart", tags=["KoBART"])
 tokenizer, model, device = get_kobart_model()
 
 def refine_text(text: str) -> str:
-    input_ids = tokenizer("[순화] " + text, return_tensors="pt", truncation=True).input_ids.to(device)
+    input_ids = tokenizer("[순화] " + text, return_tensors="pt", truncation=True, max_length=256, padding="max_length").input_ids.to(device)
 
     input_len = input_ids.shape[1]
     gen_max_len = min(128, max(64, int(input_len * 1.5)))
