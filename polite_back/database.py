@@ -8,10 +8,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
-    connect_args={"ssl": True}  
+    connect_args={"ssl": True},
+    pool_pre_ping=True
 )
 
 async_session = sessionmaker(
