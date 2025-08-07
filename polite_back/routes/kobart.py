@@ -9,13 +9,13 @@ router = APIRouter(prefix="/kobart", tags=["KoBART"])
 tokenizer, model, device = get_kobart_model()
 
 def refine_text(text: str) -> str:
-    input_ids = tokenizer("[순화] " + text, return_tensors="pt", truncation=True, max_length=256, padding="max_length").input_ids.to(device)
+    input_ids = tokenizer("[순화] " + text, return_tensors="pt", truncation=True, max_length=256).input_ids.to(device)
 
     input_len = input_ids.shape[1]
-    gen_max_len = min(128, max(64, int(input_len * 1.5)))
+    gen_max_len = min(96, max(48, int(input_len * 1.5)))
 
     with torch.no_grad():
-        output = model.generate(input_ids, max_length=gen_max_len, num_beams=4, early_stopping=True)
+        output = model.generate(input_ids, max_length=gen_max_len, num_beams=3, early_stopping=True)
     return tokenizer.decode(output[0], skip_special_tokens=True)
 
 @router.post("/generate")
