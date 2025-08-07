@@ -9,9 +9,9 @@ class TextInput(BaseModel):
     text: str
 
 @router.post("/bert/predict")
-def predict_sentiment(input: TextInput):
+async def predict_sentiment(input: TextInput):
     try:
-        pred, prob = predict(input.text, threshold=0.5) 
+        pred, prob = predict(input.text, threshold=0.5)
         return {
             "text": input.text,
             "predicted_class": pred,
@@ -19,6 +19,7 @@ def predict_sentiment(input: TextInput):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 

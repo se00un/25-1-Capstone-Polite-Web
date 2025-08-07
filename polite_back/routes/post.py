@@ -1,15 +1,17 @@
-# routes/post.py
+# polite_back/routes/post.py
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 from polite_back.database import get_db
 from polite_back.model import Post  
 
 router = APIRouter()
 
 @router.get("/posts")
-def get_all_posts(db: Session = Depends(get_db)):
-    posts = db.query(Post).all()
+async def get_all_posts(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Post))
+    posts = result.scalars().all()
     return {
         "posts": [
             {
@@ -22,9 +24,10 @@ def get_all_posts(db: Session = Depends(get_db)):
     }
 
 @router.post("/posts/{post_id}/verify")
-def verify_post_password(post_id: int, data: dict, db: Session = Depends(get_db)):
+async def verify_post_password(post_id: int, data: dict, db: AsyncSession = Depends(get_db)):
     password = data.get("password")
-    post = db.query(Post).filter(Post.id == post_id).first()
+    result = await db.execute(select(Post).where(Post.id == post_id))
+    post = result.scalar_one_or_none()
 
     if not post or post.password != password:
         return {"valid": False}
