@@ -23,7 +23,7 @@ async def startup_event():
 # CORS 허용 (프론트 주소로 수정 가능)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "https://25-1-polite-web.netlify.app", ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
