@@ -2,6 +2,7 @@
 
 from sqlalchemy import Column, Integer, String, Text, Float, Enum, ForeignKey, DateTime, Boolean
 from sqlalchemy.orm import relationship
+from sqlalchemy import text 
 from .database import Base
 import enum
 from datetime import datetime
@@ -46,5 +47,8 @@ class Comment(Base):
 
     is_modified = Column(Boolean, default=False)
 
+    is_deleted = Column(Boolean, nullable=False, server_default=text("false"))
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    
     user = relationship("User", back_populates="comments")
     post = relationship("Post", back_populates="comments")
