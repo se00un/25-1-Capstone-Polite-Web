@@ -5,6 +5,7 @@ from polite_back.routes.kobart import router as kobart_router
 from polite_back.routes.comment import router as comment_router
 from polite_back.routes.users import router as user_router
 from polite_back.routes.post import router as post_router  
+from polite_back.routes.reaction import router as reaction_routes
 from polite_back import model
 from polite_back.database import engine
 
@@ -35,6 +36,7 @@ app.include_router(kobart_router)
 app.include_router(comment_router)
 app.include_router(user_router)
 app.include_router(post_router)
+app.include_router(reaction_routes)
 
 @app.get("/")
 def read_root():

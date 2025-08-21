@@ -89,3 +89,21 @@ class Comment(Base):
     user = relationship("User", back_populates="comments")
     post = relationship("Post", back_populates="comments")
     sub_post = relationship("SubPost", back_populates="comments")
+    reactions = relationship("Reaction", back_populates="comment", cascade="all, delete-orphan")
+
+class Reaction(Base):
+    __tablename__ = "comment_reactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    comment_id = Column(Integer, ForeignKey("comments.id", ondelete="CASCADE"), index=True, nullable=False)
+    user_id = Column(String(128), index=True, nullable=False)
+    reaction_type = Column(SAEnum("like", "hate", name="reaction_type"), index=True, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("comment_id", "user_id", "reaction_type", name="uq_comment_user_reaction"),
+    )
+
+    comment = relationship("Comment", back_populates="reactions")
