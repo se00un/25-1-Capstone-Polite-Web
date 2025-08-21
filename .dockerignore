@@ -1,0 +1,20 @@
+# 파이썬 캐시
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 가상환경
+venv/
+env/
+.venv/
+
+# Git
+.git
+.gitignore
+
+# 시스템 파일
+.DS_Store
+
+# IDE 설정
+.vscode/
+.idea/
