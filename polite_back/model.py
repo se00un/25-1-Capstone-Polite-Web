@@ -101,9 +101,8 @@ class Reaction(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    comment = relationship("Comment", back_populates="reactions")
 
     __table_args__ = (
         UniqueConstraint("comment_id", "user_id", "reaction_type", name="uq_comment_user_reaction"),
     )
-
-    comment = relationship("Comment", back_populates="reactions")
