@@ -23,7 +23,7 @@ def comment_to_dict(c: model.Comment, section: int | None = None) -> Dict[str, A
         "logit_original": c.logit_original,
         "polite": c.polite,
         "logit_polite": c.logit_polite,
-        "selected_version": str(c.selected_version) if c.selected_version else None,
+        "selected_version": (c.selected_version.value if c.selected_version else None),
         "created_at": c.created_at,
         "reply_to": c.reply_to,
         "is_modified": c.is_modified,
