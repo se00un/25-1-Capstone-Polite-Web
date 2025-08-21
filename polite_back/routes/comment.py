@@ -176,6 +176,11 @@ async def get_comments_by_post(
         d["hate_count"] = int(hate_count or 0)
         d["liked_by_me"] = bool(liked_by_me)
         d["hated_by_me"] = bool(hated_by_me)
+
+        if viewer_user_id is not None:
+            d["owned_by_me"] = (
+                str(c.user_id or "").strip() == str(viewer_user_id or "").strip()
+            )
         results.append(d)
 
     return results
@@ -260,7 +265,7 @@ async def toggle_like(comment_id: int, payload: ToggleReq, db: AsyncSession = De
     existing = (await db.execute(find_stmt)).scalar_one_or_none()
 
     if existing:
-        db.delete(existing)
+        await db.delete(existing)
     else:
         db.add(model.Reaction(comment_id=comment_id, user_id=payload.user_id, reaction_type="like"))
 
