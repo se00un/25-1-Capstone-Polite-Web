@@ -15,7 +15,7 @@ def refine_text(text: str) -> str:
     gen_max_len = min(96, max(48, int(input_len * 1.5)))
 
     with torch.no_grad():
-        output = model.generate(input_ids, max_length=gen_max_len, num_beams=4, early_stopping=True)
+        output = model.generate(input_ids, max_length=gen_max_len, num_beams=5)
     return tokenizer.decode(output[0], skip_special_tokens=True)
 
 @router.post("/generate")
