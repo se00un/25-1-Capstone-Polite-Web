@@ -1,292 +1,263 @@
 # polite_back/routes/comment.py
 
-from fastapi import APIRouter, Depends, HTTPException, Body, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, asc, func, literal
-from sqlalchemy.orm import aliased
-from pydantic import BaseModel
+from sqlalchemy import select, asc
+from pydantic import BaseModel, Field
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta, timezone
+
 from polite_back import model
 from polite_back.database import get_db
-from polite_back.schemas.schemas import CommentCreate
-from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from polite_back.models.bert_model import predict
+from polite_back.routes.kobart import refine_text
+from polite_back.schemas.schemas import SuggestReq, SuggestRes, SaveReq, SaveRes
+from polite_back.model import FinalSource
 
-KST = timedelta(hours=9)
-router = APIRouter()
+router = APIRouter(prefix="/comments", tags=["Comments"])
 
-def comment_to_dict(c: model.Comment, section: int | None = None) -> Dict[str, Any]:
+KST_TZ = timezone(timedelta(hours=9))
+
+def comment_to_dict(c: model.Comment,  section: Optional[int] = None) -> Dict[str, Any]:
     return {
         "id": c.id,
         "user_id": c.user_id,
         "post_id": c.post_id,
-        "sub_post_id": c.sub_post_id,
-        "section": section,
-        "original": c.original,
-        "logit_original": c.logit_original,
-        "polite": c.polite,
-        "logit_polite": c.logit_polite,
-        "selected_version": (c.selected_version.value if c.selected_version else None),
+        "section": section if section is not None else getattr(c, "article_ord", None),
+        "sub_post_id": getattr(c, "sub_post_id", None),
+
+        "text_original": c.text_original,
+        "text_generated_polite": c.text_generated_polite,
+        "text_user_edit": c.text_user_edit,
+        "text_final": c.text_final,
+
+        "final_source": c.final_source.value if hasattr(c.final_source, "value") else c.final_source,
+        "was_edited": bool(c.was_edited),
+
+        "original_logit": c.original_logit,
+        "edit_logit": c.edit_logit,
+        "final_logit": c.final_logit,
+        "threshold_applied": c.threshold_applied,
+
+        "attempts_count": c.attempts_count,
+        "submit_success": bool(c.submit_success),
+
         "created_at": c.created_at,
-        "reply_to": c.reply_to,
-        "is_modified": c.is_modified,
-        "is_deleted": c.is_deleted,
-        "deleted_at": c.deleted_at,
-        "like_count": 0,
-        "hate_count": 0,
-        "liked_by_me": False,
-        "hated_by_me": False,
+        "updated_at": c.updated_at,
     }
 
 
-@router.post("/comments/add")
-async def add_comment(comment: CommentCreate, db: AsyncSession = Depends(get_db)):
-    q_sp = select(model.SubPost).where(
-        model.SubPost.post_id == comment.post_id,
-        model.SubPost.ord == comment.section,
-    )
-    sp = (await db.execute(q_sp)).scalar_one_or_none()
-    if not sp:
-        raise HTTPException(status_code=400, detail="Invalid post_id or section")
-
-    new_comment = model.Comment(
-        user_id=comment.user_id,
-        post_id=comment.post_id,
-        sub_post_id=sp.id,  
-        original=comment.original,
-        polite=comment.polite,
-        logit_original=comment.logit_original,
-        logit_polite=comment.logit_polite,
-        selected_version=comment.selected_version,
-        reply_to=comment.reply_to,
-        is_modified=comment.is_modified,
-        created_at=(datetime.utcnow() + KST).replace(tzinfo=None),
-    )
-
-    db.add(new_comment)
-    await db.commit()
-    await db.refresh(new_comment)
-
-    return {
-        "message": "success",
-        "comment": comment_to_dict(new_comment, section=sp.ord),
-    }
-
-@router.get("/comments/{post_id}")
-async def get_comments_by_post(
-    post_id: int,
-    section: int = Query(..., ge=1, le=3, description="섹션(ord) 번호: 1|2|3"),
-    viewer_user_id: str | None = Query(None, description="조회 사용자 ID (있으면 liked_by_me/hated_by_me 포함)"),
-    db: AsyncSession = Depends(get_db),
-):
-
-    q_sp = select(model.SubPost).where(
+async def _require_subpost(db: AsyncSession, post_id: int, section: int) -> model.SubPost:
+    stmt = select(model.SubPost).where(
         model.SubPost.post_id == post_id,
         model.SubPost.ord == section,
     )
-    sp = (await db.execute(q_sp)).scalar_one_or_none()
+    sp = (await db.execute(stmt)).scalar_one_or_none()
     if not sp:
-        raise HTTPException(status_code=404, detail="Section not found")
+        raise HTTPException(status_code=400, detail="Invalid post_id or section")
+    return sp
 
-    base_comments = (
-        select(model.Comment)
-        .where(
-            model.Comment.sub_post_id == sp.id,
-            model.Comment.is_deleted.is_(False),
-        )
-        .order_by(asc(model.Comment.created_at), asc(model.Comment.id))
-    )
 
-    likes_sq = (
-        select(model.Reaction.comment_id, func.count(model.Reaction.id).label("like_count"))
-        .where(model.Reaction.reaction_type == "like")
-        .group_by(model.Reaction.comment_id)
-        .subquery()
-    )
-    hates_sq = (
-        select(model.Reaction.comment_id, func.count(model.Reaction.id).label("hate_count"))
-        .where(model.Reaction.reaction_type == "hate")
-        .group_by(model.Reaction.comment_id)
-        .subquery()
-    )
+async def _load_post(db: AsyncSession, post_id: int) -> model.Post:
+    stmt = select(model.Post).where(model.Post.id == post_id)
+    post = (await db.execute(stmt)).scalar_one_or_none()
+    if not post:
+        raise HTTPException(status_code=404, detail="post not found")
+    return post
 
-    if viewer_user_id:
-        my_like_sq = (
-            select(model.Reaction.comment_id, func.count(model.Reaction.id).label("liked_by_me"))
-            .where(
-                model.Reaction.reaction_type == "like",
-                model.Reaction.user_id == viewer_user_id,
-            )
-            .group_by(model.Reaction.comment_id)
-            .subquery()
-        )
-        my_hate_sq = (
-            select(model.Reaction.comment_id, func.count(model.Reaction.id).label("hated_by_me"))
-            .where(
-                model.Reaction.reaction_type == "hate",
-                model.Reaction.user_id == viewer_user_id,
-            )
-            .group_by(model.Reaction.comment_id)
-            .subquery()
-        )
 
-        stmt = (
-            select(
-                model.Comment,
-                func.coalesce(likes_sq.c.like_count, 0).label("like_count"),
-                func.coalesce(hates_sq.c.hate_count, 0).label("hate_count"),
-                func.coalesce(my_like_sq.c.liked_by_me, 0).label("liked_by_me"),
-                func.coalesce(my_hate_sq.c.hated_by_me, 0).label("hated_by_me"),
+@router.post("/suggest", response_model=SuggestRes)
+async def suggest(req: SuggestReq, db: AsyncSession = Depends(get_db)):
+    post = await _load_post(db, req.post_id)
+    th = float(post.threshold)
+
+    over_pred, prob = predict(req.text, threshold=th)
+    over = bool(over_pred)
+
+    if post.policy_mode == "block":
+        if over:
+            return SuggestRes(
+                policy_mode="block",
+                over_threshold=True,
+                threshold_applied=th,
+                message="차단되었습니다. 내용을 수정해 다시 시도하세요."
             )
-            .select_from(model.Comment)
-            .outerjoin(likes_sq, likes_sq.c.comment_id == model.Comment.id)
-            .outerjoin(hates_sq, hates_sq.c.comment_id == model.Comment.id)
-            .outerjoin(my_like_sq, my_like_sq.c.comment_id == model.Comment.id)
-            .outerjoin(my_hate_sq, my_hate_sq.c.comment_id == model.Comment.id)
-            .where(
-                model.Comment.sub_post_id == sp.id,
-                model.Comment.is_deleted.is_(False),
+        else:
+            return SuggestRes(
+                policy_mode="block",
+                over_threshold=False,
+                threshold_applied=th,
+                message="통과 가능합니다."
             )
-            .order_by(asc(model.Comment.created_at), asc(model.Comment.id))
+
+    if over:
+        polite_text = refine_text(req.text)  
+        return SuggestRes(
+            policy_mode="polite_one_edit",
+            over_threshold=True,
+            threshold_applied=th,
+            polite_text=polite_text
         )
     else:
-        stmt = (
-            select(
-                model.Comment,
-                func.coalesce(likes_sq.c.like_count, 0).label("like_count"),
-                func.coalesce(hates_sq.c.hate_count, 0).label("hate_count"),
-                literal(0).label("liked_by_me"),
-                literal(0).label("hated_by_me"),
-            )
-            .select_from(model.Comment)
-            .outerjoin(likes_sq, likes_sq.c.comment_id == model.Comment.id)
-            .outerjoin(hates_sq, hates_sq.c.comment_id == model.Comment.id)
-            .where(
-                model.Comment.sub_post_id == sp.id,
-                model.Comment.is_deleted.is_(False),
-            )
-            .order_by(asc(model.Comment.created_at), asc(model.Comment.id))
+        return SuggestRes(
+            policy_mode="polite_one_edit",
+            over_threshold=False,
+            threshold_applied=th,
+            message="통과 가능합니다."
         )
 
-    rows = (await db.execute(stmt)).all()
 
-    results = []
-    for c, like_count, hate_count, liked_by_me, hated_by_me in rows:
-        d = comment_to_dict(c, section=sp.ord)
-        d["like_count"] = int(like_count or 0)
-        d["hate_count"] = int(hate_count or 0)
-        d["liked_by_me"] = bool(liked_by_me)
-        d["hated_by_me"] = bool(hated_by_me)
+@router.post("", response_model=SaveRes)
+async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
+    post = await _load_post(db, req.post_id)
+    th = float(post.threshold)
+    sp = await _require_subpost(db, req.post_id, req.section)
+    now_kst = datetime.now(KST_TZ)
 
-        if viewer_user_id is not None:
-            d["owned_by_me"] = (
-                str(c.user_id or "").strip() == str(viewer_user_id or "").strip()
+    # A: block
+    if post.policy_mode == "block":
+        over_pred, prob = predict(req.text_original, threshold=th)
+        if over_pred:
+            # 차단 기록 남김
+            new_comment = model.Comment(
+                user_id=req.user_id,
+                post_id=req.post_id,
+                sub_post_id=sp.id,
+                article_ord=req.section,
+                text_original=req.text_original,
+                text_final=None,
+                final_source=FinalSource.blocked,
+                was_edited=False,
+                original_logit=prob,
+                final_logit=None,
+                threshold_applied=th,
+                attempts_count=1,
+                submit_success=False,
+                created_at=now_kst,  
             )
-        results.append(d)
+            db.add(new_comment)
+            await db.commit()
+            await db.refresh(new_comment)
+            return SaveRes(saved=False, final_source="blocked", comment_id=new_comment.id)
 
-    return results
+        # 통과 → original 저장
+        new_comment = model.Comment(
+            user_id=req.user_id,
+            post_id=req.post_id,
+            sub_post_id=sp.id,
+            article_ord=req.section,
+            text_original=req.text_original,
+            text_final=req.text_original,
+            final_source=FinalSource.original,
+            was_edited=False,
+            original_logit=prob,
+            final_logit=prob,
+            threshold_applied=th,
+            attempts_count=1,
+            submit_success=True,
+            created_at=now_kst,  
+        )
+        db.add(new_comment)
+        await db.commit()
+        await db.refresh(new_comment)
+        return SaveRes(saved=True, final_source="original", comment_id=new_comment.id)
 
-@router.delete("/comments/{comment_id}")
-async def delete_comment(
-    comment_id: int,
-    payload: dict = Body(...),  
+    # B: polite_one_edit
+    # 기준 초과 여부
+    over_pred, prob_orig = predict(req.text_original, threshold=th)
+    if not over_pred:
+        # 미만이면 개입 없이 original 저장
+        new_comment = model.Comment(
+            user_id=req.user_id,
+            post_id=req.post_id,
+            sub_post_id=sp.id,
+            article_ord=req.section,
+            text_original=req.text_original,
+            text_final=req.text_original,
+            final_source=FinalSource.original,
+            was_edited=False,
+            original_logit=prob_orig,
+            final_logit=prob_orig,
+            threshold_applied=th,
+            attempts_count=1,
+            submit_success=True,
+            created_at=now_kst,  
+        )
+        db.add(new_comment)
+        await db.commit()
+        await db.refresh(new_comment)
+        return SaveRes(saved=True, final_source="original", comment_id=new_comment.id)
+
+    # 기준 초과 → 제안문 필요 (요청으로 받았으면 사용, 없으면 여기서 생성)
+    polite_text = req.generated_polite_text or refine_text(req.text_original)
+
+    # 1회 수정이 있으면 평가
+    if req.text_user_edit:
+        over_edit, prob_edit = predict(req.text_user_edit, threshold=th)
+        if not over_edit:
+            # 수정본 채택
+            new_comment = model.Comment(
+                user_id=req.user_id,
+                post_id=req.post_id,
+                sub_post_id=sp.id,
+                article_ord=req.section,
+                text_original=req.text_original,
+                text_generated_polite=polite_text,
+                text_user_edit=req.text_user_edit,
+                text_final=req.text_user_edit,
+                final_source=FinalSource.user_edit,
+                was_edited=True,
+                original_logit=prob_orig,
+                edit_logit=prob_edit,
+                final_logit=prob_edit,
+                threshold_applied=th,
+                attempts_count=1,
+                submit_success=True,
+                created_at=now_kst,  
+            )
+            db.add(new_comment)
+            await db.commit()
+            await db.refresh(new_comment)
+            return SaveRes(saved=True, final_source="user_edit", comment_id=new_comment.id)
+
+    # 수정 없음 또는 수정본이 여전히 초과 → 제안문 채택
+    prob_polite = predict(polite_text, threshold=th)[1]
+    new_comment = model.Comment(
+        user_id=req.user_id,
+        post_id=req.post_id,
+        sub_post_id=sp.id,
+        article_ord=req.section,
+        text_original=req.text_original,
+        text_generated_polite=polite_text,
+        text_final=polite_text,
+        final_source=FinalSource.polite,
+        was_edited=bool(req.text_user_edit),
+        original_logit=prob_orig,
+        final_logit=prob_polite,
+        threshold_applied=th,
+        attempts_count=1,
+        submit_success=True,
+        created_at=now_kst,  
+    )
+    db.add(new_comment)
+    await db.commit()
+    await db.refresh(new_comment)
+    return SaveRes(saved=True, final_source="polite", comment_id=new_comment.id)
+
+
+@router.get("", response_model=List[Dict[str, Any]])
+async def get_comments_by_post(
+    post_id: int = Query(..., gt=0),
+    section: int = Query(..., ge=1, le=3, description="섹션(ord) 번호: 1|2|3"),
     db: AsyncSession = Depends(get_db),
 ):
-    user_id = payload.get("user_id")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id required")
+    sp = await _require_subpost(db, post_id, section)
 
-    q = select(model.Comment).where(model.Comment.id == comment_id)
-    c = (await db.execute(q)).scalar_one_or_none()
-    if not c:
-        raise HTTPException(status_code=404, detail="Comment not found")
-
-    if c.is_deleted:
-        return {"message": "already deleted"}
-
-    if c.user_id != user_id:
-        raise HTTPException(status_code=403, detail="Not your comment")
-
-    c.is_deleted = True
-    c.deleted_at = (datetime.utcnow() + KST).replace(tzinfo=None)
-    await db.commit()
-
-    return {"message": "success", "deleted_id": comment_id}
-
-class ToggleReq(BaseModel):
-    user_id: str
-
-async def _reaction_counts_and_flags(db: AsyncSession, comment_id: int, user_id: str):
-    like_count_stmt = select(func.count(model.Reaction.id)).where(
-        model.Reaction.comment_id == comment_id,
-        model.Reaction.reaction_type == "like",
+    stmt = (
+        select(model.Comment)
+        .where(model.Comment.sub_post_id == sp.id)
+        .order_by(asc(model.Comment.created_at), asc(model.Comment.id))
     )
-    hate_count_stmt = select(func.count(model.Reaction.id)).where(
-        model.Reaction.comment_id == comment_id,
-        model.Reaction.reaction_type == "hate",
-    )
-    like_count = (await db.execute(like_count_stmt)).scalar_one() or 0
-    hate_count = (await db.execute(hate_count_stmt)).scalar_one() or 0
+    rows = (await db.execute(stmt)).scalars().all()
 
-    liked_stmt = select(func.count(model.Reaction.id)).where(
-        model.Reaction.comment_id == comment_id,
-        model.Reaction.user_id == user_id,
-        model.Reaction.reaction_type == "like",
-    )
-    hated_stmt = select(func.count(model.Reaction.id)).where(
-        model.Reaction.comment_id == comment_id,
-        model.Reaction.user_id == user_id,
-        model.Reaction.reaction_type == "hate",
-    )
-    liked_by_me = (await db.execute(liked_stmt)).scalar_one() or 0
-    hated_by_me = (await db.execute(hated_stmt)).scalar_one() or 0
-
-    return {
-        "comment_id": comment_id,
-        "like_count": int(like_count),
-        "hate_count": int(hate_count),
-        "liked_by_me": bool(liked_by_me),
-        "hated_by_me": bool(hated_by_me),
-    }
-
-async def _ensure_comment_exists(db: AsyncSession, comment_id: int):
-    stmt = select(model.Comment.id).where(model.Comment.id == comment_id)
-    if (await db.execute(stmt)).scalar_one_or_none() is None:
-        raise HTTPException(status_code=404, detail="Comment not found")
-
-@router.post("/comments/{comment_id}/like")
-async def toggle_like(comment_id: int, payload: ToggleReq, db: AsyncSession = Depends(get_db)):
-    await _ensure_comment_exists(db, comment_id)
-
-    find_stmt = select(model.Reaction).where(
-        model.Reaction.comment_id == comment_id,
-        model.Reaction.user_id == payload.user_id,
-        model.Reaction.reaction_type == "like",
-    )
-    existing = (await db.execute(find_stmt)).scalar_one_or_none()
-
-    if existing:
-        await db.delete(existing)
-    else:
-        db.add(model.Reaction(comment_id=comment_id, user_id=payload.user_id, reaction_type="like"))
-
-    await db.commit()
-    return await _reaction_counts_and_flags(db, comment_id, payload.user_id)
-
-@router.post("/comments/{comment_id}/hate")
-async def toggle_hate(comment_id: int, payload: ToggleReq, db: AsyncSession = Depends(get_db)):
-    await _ensure_comment_exists(db, comment_id)
-
-    find_stmt = select(model.Reaction).where(
-        model.Reaction.comment_id == comment_id,
-        model.Reaction.user_id == payload.user_id,
-        model.Reaction.reaction_type == "hate",
-    )
-    existing = (await db.execute(find_stmt)).scalar_one_or_none()
-
-    if existing:
-        await db.delete(existing)
-    else:
-        db.add(model.Reaction(comment_id=comment_id, user_id=payload.user_id, reaction_type="hate"))
-
-    await db.commit()
-    return await _reaction_counts_and_flags(db, comment_id, payload.user_id)
+    return [comment_to_dict(c, section=section) for c in rows]

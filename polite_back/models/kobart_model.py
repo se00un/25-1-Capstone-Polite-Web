@@ -2,17 +2,20 @@
 
 from transformers import PreTrainedTokenizerFast, BartForConditionalGeneration
 import torch
+from typing import Optional, Tuple
 
 MODEL_NAME = "heloolkjdasklfjlasdf/slang-kobart"
 
-# 모델과 토크나이저를 처음 import 시점에 로딩
-tokenizer = PreTrainedTokenizerFast.from_pretrained(MODEL_NAME)
-model = BartForConditionalGeneration.from_pretrained(MODEL_NAME)
+_tokenizer: Optional[PreTrainedTokenizerFast] = None
+_model: Optional[BartForConditionalGeneration] = None
+_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-model.eval()
-
-# 함수는 단순 반환만!
-def get_kobart_model():
-    return tokenizer, model, device
+def get_kobart_model() -> Tuple[PreTrainedTokenizerFast, BartForConditionalGeneration, torch.device]:
+    global _tokenizer, _model
+    if _model is None:
+        torch.set_num_threads(1)  # 1 CPU 환경 안정화
+        _tokenizer = PreTrainedTokenizerFast.from_pretrained(MODEL_NAME)
+        m = BartForConditionalGeneration.from_pretrained(MODEL_NAME)
+        m.to(_device)
+        _model = m.eval()
+    return _tokenizer, _model, _device

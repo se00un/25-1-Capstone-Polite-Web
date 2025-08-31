@@ -13,7 +13,13 @@ with open(json_path, "r", encoding="utf-8") as f:
     badword_dict = json.load(f)
 badword_list = badword_dict["words"]
 
-MODEL_NAME = "monologg/koelectra-base-v3-discriminator"  
+MODEL_NAME = "monologg/koelectra-base-v3-discriminator"
+WEIGHTS_URL = "https://huggingface.co/H0jinPark/KoELECTRA-hatespeech/resolve/main/pytorch_model.bin"
+
+# 전역 싱글톤 (지연 로딩)
+_tokenizer = None
+_model = None
+_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class KoElectraClassifier(nn.Module):
     def __init__(self):
@@ -27,34 +33,36 @@ class KoElectraClassifier(nn.Module):
         logits = self.classifier(cls_token)
         return logits.squeeze(-1)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-model = KoElectraClassifier()
-
-# 허브에 올린 가중치 URL
-WEIGHTS_URL = "https://huggingface.co/H0jinPark/KoELECTRA-hatespeech/resolve/main/pytorch_model.bin"
-
-# 허브에서 가중치 다운로드 및 로드
-state_dict = torch.hub.load_state_dict_from_url(WEIGHTS_URL, map_location=device)
-model.load_state_dict(state_dict)
-
-model.to(device)
-model.eval()
-
-tokenizer = ElectraTokenizer.from_pretrained("H0jinPark/KoELECTRA-hatespeech")
+def _ensure_loaded():
+    global _tokenizer, _model
+    if _model is None:
+        torch.set_num_threads(1)  
+        _tokenizer = ElectraTokenizer.from_pretrained("H0jinPark/KoELECTRA-hatespeech")
+        model = KoElectraClassifier()
+        state_dict = torch.hub.load_state_dict_from_url(WEIGHTS_URL, map_location=_device)
+        model.load_state_dict(state_dict)
+        model.to(_device)
+        _model = model.eval()
 
 def predict(text, threshold=0.5):
     for word in badword_list:
         if word in text:
             return 1, 0.9
 
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding="max_length", max_length=128)
-    input_ids = inputs["input_ids"].to(device)
-    attention_mask = inputs["attention_mask"].to(device)
+    _ensure_loaded()
 
-    with torch.no_grad():
-        logits = model(input_ids=input_ids, attention_mask=attention_mask)
+    # 동적 패딩(배치=1에서는 PAD 불필요) + 길이는 기존과 동일하게 max_length=128 유지
+    inputs = _tokenizer(text, return_tensors="pt", truncation=True, max_length=128)
+    input_ids = inputs["input_ids"].to(_device)
+    attention_mask = inputs["attention_mask"].to(_device)
+
+    # inference_mode: 그래프/grad 버퍼 완전 OFF (출력 동일)
+    with torch.inference_mode():
+        logits = _model(input_ids=input_ids, attention_mask=attention_mask)
         prob = torch.sigmoid(logits)
         pred = (prob > threshold).int().item()
 
-    return pred, prob.item()
+    # 임시 텐서 참조 해제(파편화 완화)
+    del input_ids, attention_mask, logits
+
+    return pred, float(prob.item())
