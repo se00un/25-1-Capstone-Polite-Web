@@ -46,3 +46,7 @@ uvicorn==0.35.0
 asyncpg==0.30.0
 greenlet
 orjson
+gunicorn
+python-dotenv==1.0.1
+sentencepiece>=0.1.99
+protobuf>=4.25.0
