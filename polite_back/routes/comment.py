@@ -12,7 +12,7 @@ from polite_back.database import get_db
 from polite_back.models.bert_model import predict
 from polite_back.routes.kobart import refine_text
 from polite_back.schemas.schemas import SuggestReq, SuggestRes, SaveReq, SaveRes
-from polite_back.model import FinalSource
+from polite_back.model import FinalSource, Comment
 
 router = APIRouter(prefix="/comments", tags=["Comments"])
 
@@ -65,6 +65,15 @@ async def _load_post(db: AsyncSession, post_id: int) -> model.Post:
         raise HTTPException(status_code=404, detail="post not found")
     return post
 
+async def _assert_user_locked_to_post(db: AsyncSession, user_id: int, post_id: int):
+    row = await db.execute(
+        select(model.Comment.post_id)
+        .where(model.Comment.user_id == user_id)
+        .limit(1)
+    )
+    first_post_id = row.scalar_one_or_none()
+    if first_post_id is not None and int(first_post_id) != int(post_id):
+        raise HTTPException(status_code=403, detail="User is locked to another post")
 
 @router.post("/suggest", response_model=SuggestRes)
 async def suggest(req: SuggestReq, db: AsyncSession = Depends(get_db)):
@@ -112,6 +121,7 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
     post = await _load_post(db, req.post_id)
     th = float(post.threshold)
     sp = await _require_subpost(db, req.post_id, req.section)
+    await _assert_user_locked_to_post(db, req.user_id, req.post_id)
     now_kst = datetime.now(KST_TZ)
 
     # A: block

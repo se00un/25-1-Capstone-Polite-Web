@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     Boolean,
     Float,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from sqlalchemy.orm import relationship
@@ -43,6 +44,10 @@ class FinalSource(str, enum.Enum):
     polite = "polite"
     user_edit = "user_edit"
     blocked = "blocked"
+
+class ReactionType(str, enum.Enum):
+    like = "like"
+    hate = "hate"
 
 
 # users
@@ -176,3 +181,50 @@ class Comment(Base):
     user = relationship("User", back_populates="comments")
     post = relationship("Post", back_populates="comments")
     sub_post = relationship("SubPost", back_populates="comments")
+
+    reactions = relationship(
+        "Reaction",
+        back_populates="comment",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+# reactions
+class Reaction(Base):
+    __tablename__ = "reactions"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    comment_id = Column(BigInteger, ForeignKey("comments.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(128), nullable=False, index=True)
+
+    reaction_type = Column(
+        PGEnum(ReactionType, name="reaction_type", create_type=False),
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True))
+
+    comment = relationship("Comment", back_populates="reactions")
+
+    __table_args__ = (
+        UniqueConstraint("comment_id", "user_id", "reaction_type", name="uq_reactions_one_type_per_user"),
+    )
+
+# Claim Reward
+class RewardClaim(Base):
+    __tablename__ = "reward_claims"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    post_id = Column(BigInteger, ForeignKey("posts.id", ondelete="CASCADE"), nullable=False, index=True)
+    claimed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    status = Column(String(20), nullable=False, default="granted")
+
+    user = relationship("User")
+    post = relationship("Post")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_reward_claims_user"),
+    )
