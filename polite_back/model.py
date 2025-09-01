@@ -159,6 +159,8 @@ class Comment(Base):
     sub_post_id = Column(BigInteger, ForeignKey("sub_posts.id", ondelete="CASCADE"), nullable=True)
     article_ord = Column(SmallInteger, nullable=True)  # 1/2/3
 
+    parent_comment_id = Column(BigInteger, ForeignKey("comments.id", ondelete="CASCADE"), nullable=True, index=True)
+
     text_original = Column(Text)
     text_generated_polite = Column(Text)
     text_user_edit = Column(Text)
@@ -178,9 +180,13 @@ class Comment(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True))
 
+    is_deleted = Column(Boolean, nullable=False, default=False, index=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
     user = relationship("User", back_populates="comments")
     post = relationship("Post", back_populates="comments")
     sub_post = relationship("SubPost", back_populates="comments")
+    parent_comment = relationship("Comment", remote_side=[id], backref="children", uselist=False)
 
     reactions = relationship(
         "Reaction",

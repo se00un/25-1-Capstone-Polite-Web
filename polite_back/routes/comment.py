@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, asc
+from sqlalchemy import select, asc, and_, func, nulls_last, text
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, timezone
@@ -25,6 +25,7 @@ def comment_to_dict(c: model.Comment,  section: Optional[int] = None) -> Dict[st
         "post_id": c.post_id,
         "section": section if section is not None else getattr(c, "article_ord", None),
         "sub_post_id": getattr(c, "sub_post_id", None),
+        "parent_comment_id": getattr(c, "parent_comment_id", None),
 
         "text_original": c.text_original,
         "text_generated_polite": c.text_generated_polite,
@@ -75,6 +76,7 @@ async def _assert_user_locked_to_post(db: AsyncSession, user_id: int, post_id: i
     if first_post_id is not None and int(first_post_id) != int(post_id):
         raise HTTPException(status_code=403, detail="User is locked to another post")
 
+
 @router.post("/suggest", response_model=SuggestRes)
 async def suggest(req: SuggestReq, db: AsyncSession = Depends(get_db)):
     post = await _load_post(db, req.post_id)
@@ -100,7 +102,7 @@ async def suggest(req: SuggestReq, db: AsyncSession = Depends(get_db)):
             )
 
     if over:
-        polite_text = refine_text(req.text)  
+        polite_text = refine_text(req.text)
         return SuggestRes(
             policy_mode="polite_one_edit",
             over_threshold=True,
@@ -128,12 +130,13 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
     if post.policy_mode == "block":
         over_pred, prob = predict(req.text_original, threshold=th)
         if over_pred:
-            # 차단 기록 남김
+            # 차단 기록: submit_success=False, final_source=blocked
             new_comment = model.Comment(
                 user_id=req.user_id,
                 post_id=req.post_id,
                 sub_post_id=sp.id,
                 article_ord=req.section,
+                parent_comment_id=getattr(req, "parent_comment_id", None), 
                 text_original=req.text_original,
                 text_final=None,
                 final_source=FinalSource.blocked,
@@ -143,7 +146,7 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
                 threshold_applied=th,
                 attempts_count=1,
                 submit_success=False,
-                created_at=now_kst,  
+                created_at=now_kst,
             )
             db.add(new_comment)
             await db.commit()
@@ -156,6 +159,7 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
             post_id=req.post_id,
             sub_post_id=sp.id,
             article_ord=req.section,
+            parent_comment_id=getattr(req, "parent_comment_id", None),  
             text_original=req.text_original,
             text_final=req.text_original,
             final_source=FinalSource.original,
@@ -165,7 +169,7 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
             threshold_applied=th,
             attempts_count=1,
             submit_success=True,
-            created_at=now_kst,  
+            created_at=now_kst,
         )
         db.add(new_comment)
         await db.commit()
@@ -173,7 +177,6 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
         return SaveRes(saved=True, final_source="original", comment_id=new_comment.id)
 
     # B: polite_one_edit
-    # 기준 초과 여부
     over_pred, prob_orig = predict(req.text_original, threshold=th)
     if not over_pred:
         # 미만이면 개입 없이 original 저장
@@ -182,6 +185,7 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
             post_id=req.post_id,
             sub_post_id=sp.id,
             article_ord=req.section,
+            parent_comment_id=getattr(req, "parent_comment_id", None),  
             text_original=req.text_original,
             text_final=req.text_original,
             final_source=FinalSource.original,
@@ -191,14 +195,14 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
             threshold_applied=th,
             attempts_count=1,
             submit_success=True,
-            created_at=now_kst,  
+            created_at=now_kst,
         )
         db.add(new_comment)
         await db.commit()
         await db.refresh(new_comment)
         return SaveRes(saved=True, final_source="original", comment_id=new_comment.id)
 
-    # 기준 초과 → 제안문 필요 (요청으로 받았으면 사용, 없으면 여기서 생성)
+    # 기준 초과 → 제안문 필요
     polite_text = req.generated_polite_text or refine_text(req.text_original)
 
     # 1회 수정이 있으면 평가
@@ -211,6 +215,7 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
                 post_id=req.post_id,
                 sub_post_id=sp.id,
                 article_ord=req.section,
+                parent_comment_id=getattr(req, "parent_comment_id", None),  
                 text_original=req.text_original,
                 text_generated_polite=polite_text,
                 text_user_edit=req.text_user_edit,
@@ -223,31 +228,59 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
                 threshold_applied=th,
                 attempts_count=1,
                 submit_success=True,
-                created_at=now_kst,  
+                created_at=now_kst,
             )
             db.add(new_comment)
             await db.commit()
             await db.refresh(new_comment)
             return SaveRes(saved=True, final_source="user_edit", comment_id=new_comment.id)
 
-    # 수정 없음 또는 수정본이 여전히 초과 → 제안문 채택
+        # 수정안이 임계 초과 → 순화문으로 저장 (was_edited=False로 기록됨)
+        prob_polite = predict(polite_text, threshold=th)[1]
+        new_comment = model.Comment(
+            user_id=req.user_id,
+            post_id=req.post_id,
+            sub_post_id=sp.id,
+            article_ord=req.section,
+            parent_comment_id=getattr(req, "parent_comment_id", None),  
+            text_original=req.text_original,
+            text_generated_polite=polite_text,
+            text_user_edit=req.text_user_edit,
+            text_final=polite_text,
+            final_source=FinalSource.polite,
+            was_edited=False,  # 강제 순화 채택이므로 '편집본 채택 아님'
+            original_logit=prob_orig,
+            edit_logit=prob_edit,
+            final_logit=prob_polite,
+            threshold_applied=th,
+            attempts_count=1,
+            submit_success=True,
+            created_at=now_kst,
+        )
+        db.add(new_comment)
+        await db.commit()
+        await db.refresh(new_comment)
+        return SaveRes(saved=True, final_source="polite", comment_id=new_comment.id)
+
+    # 수정 없음 → 제안문(순화문) 채택
     prob_polite = predict(polite_text, threshold=th)[1]
     new_comment = model.Comment(
         user_id=req.user_id,
         post_id=req.post_id,
         sub_post_id=sp.id,
         article_ord=req.section,
+        parent_comment_id=getattr(req, "parent_comment_id", None),  
         text_original=req.text_original,
         text_generated_polite=polite_text,
         text_final=polite_text,
         final_source=FinalSource.polite,
-        was_edited=bool(req.text_user_edit),
+        was_edited=False,
         original_logit=prob_orig,
         final_logit=prob_polite,
         threshold_applied=th,
         attempts_count=1,
         submit_success=True,
-        created_at=now_kst,  
+        created_at=now_kst,
     )
     db.add(new_comment)
     await db.commit()
@@ -259,15 +292,35 @@ async def add_comment(req: SaveReq, db: AsyncSession = Depends(get_db)):
 async def get_comments_by_post(
     post_id: int = Query(..., gt=0),
     section: int = Query(..., ge=1, le=3, description="섹션(ord) 번호: 1|2|3"),
+    include_deleted: bool = Query(False, description="소프트 삭제 포함 여부"),
     db: AsyncSession = Depends(get_db),
 ):
     sp = await _require_subpost(db, post_id, section)
 
     stmt = (
         select(model.Comment)
-        .where(model.Comment.sub_post_id == sp.id)
+        .where(
+            model.Comment.sub_post_id == sp.id,
+            (model.Comment.is_deleted == False) if not include_deleted else text("TRUE"),
+            (model.Comment.submit_success == True),
+        )
         .order_by(asc(model.Comment.created_at), asc(model.Comment.id))
     )
     rows = (await db.execute(stmt)).scalars().all()
 
     return [comment_to_dict(c, section=section) for c in rows]
+
+@router.delete("/{comment_id}")
+async def soft_delete_comment(comment_id: int, db: AsyncSession = Depends(get_db)):
+    stmt = select(model.Comment).where(model.Comment.id == comment_id)
+    c = (await db.execute(stmt)).scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Comment not found")
+
+    if getattr(c, "is_deleted", False):
+        return {"deleted": True, "already": True, "comment_id": comment_id}
+
+    c.is_deleted = True
+    c.deleted_at = datetime.now(KST_TZ)
+    await db.commit()
+    return {"deleted": True, "comment_id": comment_id}

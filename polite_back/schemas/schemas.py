@@ -21,12 +21,10 @@ class FinalSource(str, Enum):
 
 
 class UserRegister(BaseModel):
-    """사용자 등록 요청: username 기반 (id는 DB가 생성)"""
     username: str = Field(..., min_length=1, max_length=50)
 
 
 class UserVerify(BaseModel):
-    """사용자 존재 확인: username 또는 id 중 하나만 전달"""
     username: Optional[str] = Field(None, min_length=1, max_length=50)
     id: Optional[int] = None
 
@@ -58,6 +56,7 @@ class SaveReq(BaseModel):
     post_id: int = Field(..., gt=0)
     section: int = Field(..., ge=1, le=3)  
     text_original: str = Field(..., min_length=1)
+    parent_comment_id: Optional[int] = None
 
     # B 전용(무조건 수락 + 1회 수정)
     generated_polite_text: Optional[str] = None
