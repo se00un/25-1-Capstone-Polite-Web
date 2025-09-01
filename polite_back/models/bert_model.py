@@ -6,6 +6,8 @@ from transformers import ElectraTokenizer, ElectraModel
 import json
 import os
 
+CACHE_DIR = os.environ.get("TRANSFORMERS_CACHE", "/tmp/huggingface/transformers")
+
 # 욕설 사전 불러오기
 base_dir = os.path.dirname(os.path.abspath(__file__))
 json_path = os.path.join(base_dir, "word_list.json")

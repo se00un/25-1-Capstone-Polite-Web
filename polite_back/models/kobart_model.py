@@ -3,7 +3,9 @@
 from transformers import PreTrainedTokenizerFast, BartForConditionalGeneration
 import torch
 from typing import Optional, Tuple
+import os
 
+CACHE_DIR = os.environ.get("TRANSFORMERS_CACHE", "/tmp/huggingface/transformers")
 MODEL_NAME = "heloolkjdasklfjlasdf/slang-kobart"
 
 _tokenizer: Optional[PreTrainedTokenizerFast] = None
