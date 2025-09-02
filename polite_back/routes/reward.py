@@ -1,8 +1,9 @@
 # polite_back/routes/reward.py
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
+from typing import Dict
 import os
 
 from polite_back.database import get_db
@@ -16,41 +17,58 @@ router = APIRouter(prefix="/rewards", tags=["Rewards"])
 REWARD_URL = os.getenv("REWARD_OPENCHAT_URL", "")
 REWARD_PW  = os.getenv("REWARD_OPENCHAT_PW", "")
 
-def _counts_by_section(db: Session, user_id: int, post_id: int) -> dict[int, int]:
-    rows = (
-        db.query(
+
+async def _counts_by_section(db: AsyncSession, user_id: int, post_id: int) -> Dict[int, int]:
+    conditions = [
+        Comment.user_id == user_id,
+        Comment.post_id == post_id,
+        Comment.submit_success.is_(True),
+        Comment.is_deleted.is_(False),
+    ]
+
+    q = (
+        select(
             Comment.article_ord.label("ord"),
             func.count(Comment.id).label("cnt")
         )
-        .filter(
-            Comment.user_id == user_id,
-            Comment.post_id == post_id,
-            Comment.submit_success.is_(True)
-        )
+        .where(*conditions)
         .group_by(Comment.article_ord)
-        .all()
     )
+    res = await db.execute(q)
+    rows = res.all()
+
     counts = {1: 0, 2: 0, 3: 0}
-    for r in rows:
-        if r.ord in (1, 2, 3):
-            counts[int(r.ord)] = int(r.cnt)
+    for ord_, cnt in rows:
+        try:
+            k = int(ord_)
+        except (TypeError, ValueError):
+            continue
+        if k in (1, 2, 3):
+            counts[k] = int(cnt or 0)
     return counts
 
-def _is_eligible(counts: dict[int, int]) -> tuple[bool, int]:
+
+def _is_eligible(counts: Dict[int, int]) -> tuple[bool, int]:
     total = sum(counts.values())
     ok = (counts.get(1, 0) >= 3 and counts.get(2, 0) >= 3 and counts.get(3, 0) >= 3 and total >= 9)
     return ok, total
 
+
 @router.post("/eligibility", response_model=RewardEligibilityResponse)
-def check_eligibility(req: RewardEligibilityRequest, db: Session = Depends(get_db)):
-    if not db.query(Post.id).filter(Post.id == req.post_id).first():
+async def check_eligibility(req: RewardEligibilityRequest, db: AsyncSession = Depends(get_db)):
+    # Post 존재 확인
+    res = await db.execute(select(Post.id).where(Post.id == req.post_id))
+    if res.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Post not found")
 
-    counts = _counts_by_section(db, req.user_id, req.post_id)
+    counts = await _counts_by_section(db, req.user_id, req.post_id)
     ok, total = _is_eligible(counts)
-    already = db.query(RewardClaim.id).filter(
-        RewardClaim.user_id == req.user_id
-    ).first() is not None  # user_id UNIQUE 정책
+
+    # 이미 수령했는지(user_id UNIQUE 정책)
+    res2 = await db.execute(
+        select(RewardClaim.id).where(RewardClaim.user_id == req.user_id).limit(1)
+    )
+    already = res2.scalar_one_or_none() is not None
 
     return RewardEligibilityResponse(
         eligible=ok,
@@ -59,13 +77,19 @@ def check_eligibility(req: RewardEligibilityRequest, db: Session = Depends(get_d
         total_count=total,
     )
 
+
 @router.post("/claim", response_model=RewardGrantResponse)
-def claim_reward(req: RewardEligibilityRequest, db: Session = Depends(get_db)):
-    if not db.query(Post.id).filter(Post.id == req.post_id).first():
+async def claim_reward(req: RewardEligibilityRequest, db: AsyncSession = Depends(get_db)):
+    # Post 존재 확인
+    res = await db.execute(select(Post.id).where(Post.id == req.post_id))
+    if res.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Post not found")
 
-    # 이미 수령한 경우: 링크/비번 재노출(운영 편의)
-    existing = db.query(RewardClaim).filter(RewardClaim.user_id == req.user_id).first()
+    # 이미 수령: 링크/비번 재노출
+    res_exist = await db.execute(
+        select(RewardClaim).where(RewardClaim.user_id == req.user_id).limit(1)
+    )
+    existing = res_exist.scalar_one_or_none()
     if existing:
         return RewardGrantResponse(
             granted=False,
@@ -75,14 +99,14 @@ def claim_reward(req: RewardEligibilityRequest, db: Session = Depends(get_db)):
         )
 
     # 자격 확인
-    counts = _counts_by_section(db, req.user_id, req.post_id)
+    counts = await _counts_by_section(db, req.user_id, req.post_id)
     ok, _ = _is_eligible(counts)
     if not ok:
         return RewardGrantResponse(granted=False, already_claimed=False)
 
-    # 수령 기록 저장 (user_id UNIQUE가 DB에서 2중 보호)
+    # 수령 기록 저장 (user_id UNIQUE로 이중 보호)
     db.add(RewardClaim(user_id=req.user_id, post_id=req.post_id, status="granted"))
-    db.commit()
+    await db.commit()
 
     return RewardGrantResponse(
         granted=True,
