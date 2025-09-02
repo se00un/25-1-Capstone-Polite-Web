@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from datetime import datetime, timezone
 from typing import List
 
 from polite_back.database import get_db
@@ -73,9 +74,7 @@ async def _flags(db: AsyncSession, comment_id: int, user_id: str):
     return liked, hated
 
 
-async def _toggle_same_type(
-    db: AsyncSession, comment_id: int, user_id: str, rtype: ReactionType
-):
+async def _toggle_same_type(db: AsyncSession, comment_id: int, user_id: str, rtype: ReactionType):
     res = await db.execute(
         select(Reaction)
         .where(
@@ -88,10 +87,17 @@ async def _toggle_same_type(
     existing = res.scalar_one_or_none()
 
     if existing:
-        await db.delete(existing)  # 토글 OFF
+        await db.delete(existing)  
     else:
-        db.add(Reaction(comment_id=comment_id, user_id=user_id, reaction_type=rtype))  # 토글 ON
-
+        now_ts = datetime.now(timezone.utc)
+        db.add(
+            Reaction(
+                comment_id=comment_id,
+                user_id=user_id,
+                reaction_type=rtype,
+                updated_at=now_ts,  
+            )
+        )
     await db.commit()
 
 
