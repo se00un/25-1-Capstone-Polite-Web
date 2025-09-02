@@ -5,7 +5,8 @@ import torch
 from typing import Optional, Tuple
 import os
 
-CACHE_DIR = os.environ.get("TRANSFORMERS_CACHE", "/tmp/huggingface/transformers")
+os.environ["HF_HOME"] = "/opt/render/project/.hf_cache"
+os.environ["TRANSFORMERS_CACHE"] = "/opt/render/project/.hf_cache"
 MODEL_NAME = "heloolkjdasklfjlasdf/slang-kobart"
 
 _tokenizer: Optional[PreTrainedTokenizerFast] = None
