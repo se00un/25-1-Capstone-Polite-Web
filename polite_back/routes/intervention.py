@@ -52,3 +52,29 @@ async def log_intervention(payload: dict, db: AsyncSession = Depends(get_db)):
     db.add(ev)
     await db.commit()
     return {"logged": True, "id": ev.id}
+
+@router.get("/meta")
+async def get_meta(post_id: int, section: int, db: AsyncSession = Depends(get_db)):
+    from polite_back.model import Post, SubPost
+
+    # post 불러오기
+    result = await db.execute(select(Post).where(Post.id == post_id))
+    post = result.scalar_one_or_none()
+    if not post:
+        return {"error": "post not found"}
+
+    # sub_post 확인 (section → ord 매핑)
+    result_sp = await db.execute(
+        select(SubPost).where(SubPost.post_id == post_id, SubPost.ord == section)
+    )
+    sub_post = result_sp.scalar_one_or_none()
+    if not sub_post:
+        return {"error": "sub_post not found"}
+
+    return {
+        "post_id": post.id,
+        "section": section,
+        "group": post.policy_mode,     
+        "threshold": post.threshold,
+        "policy_mode": post.policy_mode 
+    }
